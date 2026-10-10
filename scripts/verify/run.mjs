@@ -9,6 +9,7 @@
 // Suites:
 //   offline  panel-tabs         one editor tab, sessions switch in place
 //            settings-flow      settings delivery under both webview behaviours
+//            resolve            install-root/panel-URL rules (npm -g, seed=1)
 //            shell-check        the shell page runs + iframe-ready handshake
 //            adopt-unpatched    adopting an unpatched server patches its frontend
 //            feature-check      workspace/session/theme lifecycle through the API
@@ -26,7 +27,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { REPO, dshHome, forgeCookie, originArg, rpc } from "./harness.mjs";
 
-const OFFLINE = ["panel-tabs", "settings-flow", "shell-check", "adopt-unpatched", "feature-check", "launcher", "notice", "platform", "package-check"];
+const OFFLINE = ["panel-tabs", "settings-flow", "resolve", "shell-check", "adopt-unpatched", "feature-check", "launcher", "notice", "platform", "package-check"];
 const LIVE = ["panels", "pin", "plugins", "titles"];
 
 const argv = process.argv.slice(2);

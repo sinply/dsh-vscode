@@ -220,10 +220,15 @@ function panelSrc(
   if (!supported) return url;
   const sep = url.includes("?") ? "&" : "?";
   let src = `${url}${sep}dshPanel=${panel}`;
-  const sid = sessionId ?? opts?.seedSession;
+  // ChatPanel reports an unpinned tab as "" (not undefined), so a plain
+  // `sessionId ?? opts.seedSession` fallback never fired: `seed=1` was dropped
+  // for every default/settings tab and the GUI booted on a stale
+  // new-session view instead of seeding the last conversation.
+  const pinned = sessionId !== undefined && sessionId !== "";
+  const sid = pinned ? sessionId : opts?.seedSession;
   if (sid !== undefined && sid !== "") {
     src += `&session=${encodeURIComponent(sid)}`;
-    if (sessionId === undefined) src += "&seed=1";
+    if (!pinned) src += "&seed=1";
   }
   if (opts?.openSettings === true) src += "&openSettings=1";
   if (opts?.openPanel !== undefined && opts.openPanel !== "") src += `&openPanel=${encodeURIComponent(opts.openPanel)}`;

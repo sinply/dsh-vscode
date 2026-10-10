@@ -597,9 +597,10 @@ export class DshManager {
         /* the CLI tree has no frontend package — leave it to the scans */
       }
     }
-    // 4. A global npm install.
+    // 4. A global npm install. `npm root -g` reports the node_modules dir, so
+    // normalize it first (see installRootOf).
     const globalRoot = await npmGlobalRoot();
-    if (globalRoot !== undefined) pushRoot(globalRoot);
+    if (globalRoot !== undefined) pushRoot(installRootOf(globalRoot));
     // 5. The npm npx cache — the usual home of an adopted `npx dsh web` server.
     const npxRoot =
       process.platform === "win32"
@@ -1782,7 +1783,7 @@ export class DshManager {
 
     const globalRoot = await npmGlobalRoot();
     if (globalRoot !== undefined) {
-      const globalBin = await this.locateInTree(globalRoot);
+      const globalBin = await this.locateInTree(installRootOf(globalRoot));
       if (globalBin !== undefined) candidates.push(globalBin);
     }
 
@@ -2015,6 +2016,22 @@ async function npmGlobalRoot(): Promise<string | undefined> {
   if (!result.ok) return undefined;
   const root = (result.stdout ?? "").trim();
   return root === "" ? undefined : root;
+}
+
+/**
+ * Normalize an install root so `path.join(root, "node_modules", …)` lands on the
+ * real tree.
+ *
+ * `npm root -g` prints the `node_modules` DIRECTORY itself
+ * (`C:\Users\<u>\AppData\Roaming\npm\node_modules`), while every scanner here
+ * joins another `node_modules` under the value it is given — which produced
+ * `…\npm\node_modules\node_modules\@deepseek-ai\dsh\lib\bin.js` and made both the
+ * global-install lookup and the frontend scan silently miss. Also drops a
+ * trailing separator so `path.basename` sees the last real segment.
+ */
+export function installRootOf(root: string): string {
+  const trimmed = root.replace(/[\\/]+$/, "");
+  return path.basename(trimmed).toLowerCase() === "node_modules" ? path.dirname(trimmed) : trimmed;
 }
 
 interface RunResult {

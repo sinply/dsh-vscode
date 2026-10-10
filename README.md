@@ -6,8 +6,10 @@
 
 本扩展**自行启动并管理 `dsh web` 服务**，并把 GUI **拆成两块**嵌入 VS Code
 
-本次更新（版本 2026.10.10）：
+本次更新（版本 2026.10.11）：
 
+- **全局安装的 dsh 找不到了（`npm root -g` 的路径语义）**：`npm root -g` 打印的是 `node_modules` **目录本身**（`C:\…\npm\node_modules`），而扫描器还会在它下面再接一层 `node_modules`，于是拼出 `…\npm\node_modules\node_modules\@deepseek-ai\dsh\lib\bin.js` —— 全局安装既选不中、前端也扫不到。新增 `installRootOf()` 统一剥掉尾部 `node_modules`（顺手容忍结尾斜杠），用于全局安装查找与前端扫描两处。
+- **默认/设置标签页丢掉了「记住上次会话」的种子**：`panelSrc()` 用 `sessionId ?? opts.seedSession` 回退，但 `ChatPanel` 对未固定的标签页传的是 `""`（不是 `undefined`），`"" ?? x` 不会回退 —— 于是每个默认/设置标签页都少了 `&seed=1`，GUI 起来停在「新会话」而不是上次那段对话。现在按 `sessionId !== undefined && sessionId !== ""` 判断固定与否，未固定时才写 `seed=1`。
 - **Linux 上的断连/不稳定（两处修复）**：内置的 dsh 树过去只带 Windows 原生依赖（`node-pty` / `sharp` / `ripgrep`），但选树的逻辑**不看平台**、只挑「最新的一份」，于是在 Linux 上照样用了这份 Windows 构建 —— `node-pty` 的原生模块加载失败，服务起来又断、反复重连。
   - 打包时补齐 `linux-x64` 的原生依赖（`node-pty/prebuilds/linux-x64/pty.node`、`@img/sharp-linux-x64`、`@img/sharp-libvips-linux-x64`、`@vscode/ripgrep-linux-x64`，约 +24 MB），内置树在 **win32-x64 与 linux-x64** 上都能直接启动，离线安装同样可用。新增脚本 `scripts/fetch-platform-deps.mjs`（按 `package-lock.json` 的 `resolved` + `integrity` 取包，已挂在 `vscode:prepublish` 上）。
   - 运行平台不在内置树的覆盖范围时（macOS / arm64 等），扩展会**跳过内置树**并在输出面板写明原因，改用 PATH / 全局安装的那份 dsh，而不是硬拿一份装不起来的东西去起服。
@@ -15,7 +17,7 @@
   1. 用同一 `DSH_HOME` 起一个临时兄弟进程重放这次写入：成功 ⇒ 只是当前服务进程启坏了，而写入已经落盘；
   2. 于是**自动重启服务**并提示「设置写入被上游 dsh 拒绝，扩展已代为落盘，正在重启服务使其生效…」，改动当场生效。
   兄弟进程**同样被拒** ⇒ 问题在 home/CLI 侧，扩展如实提示需要手动落 `cordis.patch.yml`，不再假装成功。
-- **验证**：`npm run verify` 新增离线套件 `platform`（内置树的平台判定真值表 + 各平台原生依赖确实在包里 + `.vscodeignore` 不会把它们排除掉），`settings-flow` 新增第 0 层（拒绝报文识别、`{ns, patch}` 反解、代理只窥探设置端点且字节级原样透传、一次拒绝恰好上报一次）；另有 WSL Ubuntu-22.04 实机验证：内置树在 Linux 下 `node-pty` / `sharp` / `ripgrep` 全部可加载，`dsh web` 正常起服并持续存活（不是起来就断）。
+- **验证**：`npm run verify` 新增离线套件 `platform`（内置树的平台判定真值表 + 各平台原生依赖确实在包里 + `.vscodeignore` 不会把它们排除掉）与 `resolve`（`installRootOf` 真值表 + 默认/固定标签页的 URL 规则：未固定才带 `seed=1`、固定时只带 `session=`），`settings-flow` 新增第 0 层（拒绝报文识别、`{ns, patch}` 反解、代理只窥探设置端点且字节级原样透传、一次拒绝恰好上报一次）；另有 WSL Ubuntu-22.04 实机验证：内置树在 Linux 下 `node-pty` / `sharp` / `ripgrep` 全部可加载，`dsh web` 正常起服并持续存活（不是起来就断）。
 
 ## 已知问题 / 排查
 
