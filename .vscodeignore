@@ -62,30 +62,34 @@ node_modules/**/coverage/**
 node_modules/**/.bin/**
 
 # node-pty is platform-specific: dsh loads the matching prebuild at runtime
-# via process.platform/process.arch, never the others. ship only the win32-x64
-# prebuilds (the extension is published for VSCode Windows / Cursor Windows;
-# the macOS / Linux users get dsh via PATH or auto-install, never via this
-# extension's bundled copy).
+# via process.platform/process.arch, never the others. The package ships the
+# platforms the bundled tree is a candidate on — win32-x64 and linux-x64 (WSL /
+# Remote-SSH / Codespaces put the extension host on the Linux side:
+# extensionKind is ["workspace"]) — and drops the rest. The linux-x64 prebuild
+# is already in node-pty's tarball; `npm run fetch-platform-deps` is what adds
+# the linux halves of @img/sharp-* and @vscode/ripgrep-*, which npm installs
+# only for the host platform. Keep this list in sync with
+# BUNDLED_TREE_PLATFORMS in src/dshManager.ts.
 node_modules/node-pty/prebuilds/darwin-arm64/**
 node_modules/node-pty/prebuilds/darwin-x64/**
 node_modules/node-pty/prebuilds/linux-arm64/**
-node_modules/node-pty/prebuilds/linux-x64/**
 node_modules/node-pty/prebuilds/win32-arm64/**
 node_modules/node-pty/third_party/conpty/**/win10-arm64/**
 
-# @img/sharp: only the matching platform package is loaded; others are dead weight.
+# @img/sharp: only the matching platform package is loaded; others are dead
+# weight. linux-x64 ships together with @img/sharp-libvips-linux-x64 (~18 MB),
+# which @img/sharp-linux-x64/index.cjs resolves as its libvips payload — that is
+# the price of the bundled tree booting off-Windows.
 node_modules/@img/sharp-darwin-arm64/**
 node_modules/@img/sharp-darwin-x64/**
 node_modules/@img/sharp-linux-arm64/**
-node_modules/@img/sharp-linux-x64/**
 node_modules/@img/sharp-wasm32/**
 
 # @vscode/ripgrep: shipped for all platforms; only the platform that matches
-# the user's OS is ever invoked.
+# the user's OS is ever invoked. linux-x64 ships with the bundled tree.
 node_modules/@vscode/ripgrep-darwin-arm64/**
 node_modules/@vscode/ripgrep-darwin-x64/**
 node_modules/@vscode/ripgrep-linux-arm64/**
-node_modules/@vscode/ripgrep-linux-x64/**
 
 # node-addon-require-builtin: tiny helper, no native payload, but its test
 # fixtures and tarball are noise.

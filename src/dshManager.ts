@@ -24,7 +24,7 @@ import { createRequire } from "node:module";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { GuiProxy } from "./guiProxy";
+import { GuiProxy, type RejectedSettingsWrite } from "./guiProxy";
 
 // Shared split-panel adapter shipped next to out/ (see panel-inject.js).
 // The injected script reads ?dshPanel=sidebar|center and adapts the GUI.
@@ -97,6 +97,15 @@ export interface DshOptions {
    * sibling server and report whether IT accepts the same write (default true).
    * The sibling itself is created with this off, so the probe can never nest. */
   settingsProbe?: boolean;
+  /** Automate the documented settings-write workaround (default true): when the
+   * running server refuses a write, replay it through a fresh sibling process
+   * (which persists it into the profile patch) and restart this service once so
+   * the value takes effect. */
+  settingsFallback?: boolean;
+  /** User-visible notice sink (VS Code information message). Used for the
+   * settings-write recovery, which changes the user's configuration and
+   * therefore must not stay silent. */
+  onNotice?: (message: string) => void;
   /** Called on every state transition. */
   onInfo: (info: DshRuntimeInfo) => void;
   /** Log sink. */
@@ -122,6 +131,43 @@ const TITLE_BACKFILL_PER_ROUND = 12;
 /** One-shot workspace baseline cache TTL — the launcher refreshes every few
  * seconds and each uncached call would open/close a mux stream. */
 const WORKSPACE_BASELINE_CACHE_MS = 5_000;
+/** Platforms whose native payloads ship inside this package, as `<platform>-<arch>`.
+ *
+ * The VSIX carries ONE prebuilt `node_modules` tree, assembled on Windows, whose
+ * platform-split native payloads are selected at packaging time: win32-x64 comes
+ * from the host `npm install`, linux-x64 from `npm run fetch-platform-deps`
+ * (node-pty's linux prebuild is already in its tarball; @img/sharp-linux-x64,
+ * @img/sharp-libvips-linux-x64 and @vscode/ripgrep-linux-x64 are fetched from the
+ * pins in package-lock.json). Everything else — darwin, win32-arm64,
+ * linux-arm64 — is excluded from the archive. Keep in sync with .vscodeignore.
+ *
+ * On any other platform the bundled tree must not even be a candidate: it fails
+ * at the top-level `import * as nodePty from "node-pty"` in
+ * @deepseek-ai/dsh-subprocess-local (and again on sharp / ripgrep), and because
+ * `preferNewer` keeps the FIRST candidate on a version tie it used to beat an
+ * equally new PATH/global install — which is what made the extension unstable on
+ * Linux, where no native payloads were shipped at all. */
+export const BUNDLED_TREE_PLATFORMS = ["win32-x64", "linux-x64"];
+
+/** Whether the tree shipped inside this package can run on `platform`-`arch`. */
+export function bundledTreeUsable(platform: string, arch: string): boolean {
+  return BUNDLED_TREE_PLATFORMS.includes(`${platform}-${arch}`);
+}
+
+/**
+ * The `{ns, patch}` pair a refused settings write has to be replayed with, or
+ * undefined when the observed wire form carried no usable namespace — then there
+ * is nothing to replay and the caller falls back to the documented manual path.
+ *
+ * Accepts both shapes seen in the wild: the extension's own `settings.update`
+ * call args and the GUI's `/api/settings/update` request body.
+ */
+export function settingsWriteTarget(args: unknown): { ns: string; patch?: unknown } | undefined {
+  if (args === null || typeof args !== "object") return undefined;
+  const record = args as { ns?: unknown; patch?: unknown };
+  if (typeof record.ns !== "string" || record.ns === "") return undefined;
+  return { ns: record.ns, patch: record.patch };
+}
 
 /**
  * Compare two dsh version strings (semver-ish, e.g. "0.1.0-rc.7").
@@ -446,8 +492,11 @@ export class DshManager {
     const port = Number(u.port);
     if (!Number.isFinite(port) || port === 0) return;
     // The cookie is re-resolved per request: an expired/missing session gets
-    // re-minted (or re-forged) without a proxy restart.
-    const proxy = new GuiProxy(port, () => this.ensureAuthCookie(this.parsedUrl() ?? u));
+    // re-minted (or re-forged) without a proxy restart. The rejection hook sees
+    // the GUI's own settings writes, which never travel through this process.
+    const proxy = new GuiProxy(port, () => this.ensureAuthCookie(this.parsedUrl() ?? u), (rejection) => {
+      void this.recoverSettingsWrite({ ns: rejection.ns, patch: rejection.patch }, "gui", rejection.message);
+    });
     try {
       await proxy.start();
       this.guiProxy = proxy;
@@ -651,7 +700,7 @@ export class DshManager {
                 const message = parsed.result?.error?.message ?? text.slice(0, 200);
                 this.opts.log(`rpc ${wire.endpoint} failed: ${message}`);
                 if (wire.endpoint === "settings/update" && /root Include entry/.test(message)) {
-                  void this.diagnoseSettingsWrite(wire.args);
+                  void this.recoverSettingsWrite(wire.args, "extension", message);
                 }
                 resolve(undefined);
               }
@@ -1201,30 +1250,66 @@ export class DshManager {
       }));
   }
 
-  /** One-shot diagnostic for "the server rejects settings writes".
+  /** One-shot diagnostic for "the server rejects settings writes", and the
+   * recovery that follows it.
    *
    * A server can boot into a state where READS work but every settings write is
    * rejected with "profile reload requires the root Include entry". Only a
    * process started by the extension host has ever shown it, and every fresh
-   * process reproduces fine, so this records what the failing child was and asks
-   * whether a freshly spawned SIBLING accepts the very same write: the answer
-   * separates "this process is odd" from "this home/CLI is odd" without another
-   * round trip through the user. */
+   * process reproduces fine, so the probe asks whether a freshly spawned
+   * SIBLING accepts the very same write: the answer separates "this process is
+   * odd" from "this home/CLI is odd".
+   *
+   * When the sibling accepts, the value IS persisted (same DSH_HOME — the
+   * sibling writes the profile patch); the only thing missing is a restart,
+   * because the running process never re-reads the profile. That is exactly the
+   * documented manual workaround, so it is done here, ONCE per manager
+   * lifetime: the settings panel saves one namespace at a time, so without the
+   * one-shot guard a burst of rejected writes would boot a sibling per key. */
   private settingsDiagDone = false;
+  private settingsRecoveryDone = false;
   private lastSpawnLine?: string;
 
-  private async diagnoseSettingsWrite(args: unknown): Promise<void> {
-    if (this.settingsDiagDone) return;
+  private async recoverSettingsWrite(args: unknown, source: "extension" | "gui", detail?: string): Promise<void> {
+    if (this.opts.settingsFallback === false) return;
+    if (this.settingsRecoveryDone) return;
+    this.settingsRecoveryDone = true;
+    const target = settingsWriteTarget(args);
+    this.opts.log(
+      `settings: the running server REJECTS settings writes (${source} path${target !== undefined ? `, ns=${target.ns}` : ""})` +
+        (detail !== undefined && detail !== "" ? `: ${detail}` : "")
+    );
+    this.opts.log(`settings: failing child was started as ${this.lastSpawnLine ?? "(unknown)"}`);
+    if (target === undefined) {
+      this.opts.onNotice?.("设置写入被上游 dsh 拒绝，且这次写入无法还原；请参考 README 手动写入 profiles/web/cordis.patch.yml 后重启服务。");
+      return;
+    }
+    const persisted = await this.probeSettingsWrite(target);
+    if (!persisted) {
+      this.opts.onNotice?.("设置写入被上游 dsh 拒绝，替代进程也无法保存；请参考 README 手动写入 profiles/web/cordis.patch.yml 后重启服务。");
+      return;
+    }
+    this.opts.log("settings: a fresh sibling persisted the patch into the profile");
+    if (this.external) {
+      this.opts.onNotice?.("设置已写入配置文件，但当前 dsh 服务是外部启动的（不由本扩展管理）：请重启该服务后生效。");
+      return;
+    }
+    this.opts.onNotice?.("设置写入被上游 dsh 拒绝，扩展已代为落盘，正在重启服务使其生效…");
+    await this.restartForSettings();
+  }
+
+  /** Replay the refused write through a fresh sibling (same DSH_HOME) and
+   * return whether that sibling persisted it. */
+  private async probeSettingsWrite(args: { ns: string; patch?: unknown }): Promise<boolean> {
+    if (this.settingsDiagDone) return false;
     // The sibling probe is created with this switched off: a nesting probe would
     // spawn a grandchild, that one another, and so on — each booting a server
     // against the same home.
-    if (this.opts.settingsProbe === false) return;
+    if (this.opts.settingsProbe === false) return false;
     this.settingsDiagDone = true;
-    this.opts.log("settings: the running server REJECTS settings writes (reads keep working)");
-    this.opts.log(`settings: failing child was started as ${this.lastSpawnLine ?? "(unknown)"}`);
     if (this.resolvedCliBin === undefined) {
-      this.opts.log("settings: no resolved CLI to probe with");
-      return;
+      this.opts.log("settings-probe: no resolved CLI to probe with");
+      return false;
     }
     const baseLog = this.opts.log;
     const sibling = new DshManager({
@@ -1232,6 +1317,7 @@ export class DshManager {
       port: 0,
       autoRestart: false,
       settingsProbe: false,
+      settingsFallback: false,
       onInfo: () => {},
       log: (line: string) => baseLog(`settings-probe: ${line}`)
     });
@@ -1239,16 +1325,18 @@ export class DshManager {
       await sibling.start();
       if (sibling.state !== "running") {
         this.opts.log("settings-probe: a sibling server did not come up");
-        return;
+        return false;
       }
       const accepted = await sibling.rpc("settings.update", args);
       this.opts.log(
         accepted === undefined
           ? "settings-probe: a FRESH sibling rejects the same write too → the home/CLI is the difference, not this process"
-          : "settings-probe: a FRESH sibling ACCEPTS the same write → this process booted broken; restarting the service heals it"
+          : "settings-probe: a FRESH sibling ACCEPTS the same write → the profile patch now holds it"
       );
+      return accepted !== undefined;
     } catch (err) {
       this.opts.log(`settings-probe: failed: ${String(err)}`);
+      return false;
     } finally {
       try {
         await sibling.stop();
@@ -1258,8 +1346,24 @@ export class DshManager {
     }
   }
 
+  /** Restart the owned server so a patch written to the profile file is read.
+   * The panel re-renders on the state transition, which reloads the embedded
+   * GUI against the fresh server. */
+  private async restartForSettings(): Promise<void> {
+    if (this.disposed) return;
+    this.opts.log("settings: restarting the dsh service so the persisted patch takes effect");
+    try {
+      await this.stop();
+      this.autoRestartCount = 0;
+      await this.start();
+    } catch (err) {
+      this.opts.log(`settings: restart failed: ${String(err)} — run "DSH: Restart Server" to apply the change`);
+    }
+  }
+
   /** Apply the dsh UI theme preference (ui-theme.preference) via the settings API. */
-  async applyTheme(preference: "light" | "dark" | "system"): Promise<boolean> {    const value = await this.rpc("settings.update", { ns: "ui-theme", patch: { preference } });
+  async applyTheme(preference: "light" | "dark" | "system"): Promise<boolean> {
+    const value = await this.rpc("settings.update", { ns: "ui-theme", patch: { preference } });
     if (value === undefined) {
       this.opts.log(`applyTheme: could not set ui-theme.preference=${preference}`);
       return false;
@@ -1657,7 +1761,21 @@ export class DshManager {
     // 2. Collect candidates: bundled install, PATH `dsh`, global npm install.
     const candidates: Array<{ cmd: string; prefixArgs: string[]; shell?: boolean; env?: NodeJS.ProcessEnv; version?: string }> = [];
     const bundled = await this.locateInTree(path.join(__dirname, ".."));
-    if (bundled !== undefined) candidates.push(bundled);
+    if (bundled !== undefined) {
+      // Guard: only use the shipped tree on a platform whose native payloads are
+      // actually in the package. Off-Windows (macOS, win32-arm64, linux-arm64) the
+      // bundled copy has none of them, and picking it — which preferNewer does
+      // whenever no newer PATH/global install exists — turned the extension into
+      // an unstable server. PATH / global npm / npx / auto-install provide a
+      // correctly built dsh instead.
+      if (bundledTreeUsable(process.platform, process.arch)) {
+        candidates.push(bundled);
+      } else {
+        this.opts.log(
+          `resolve: ignored the bundled dsh v${bundled.version ?? "?"} — packaged for ${BUNDLED_TREE_PLATFORMS.join("/")}, running ${process.platform}-${process.arch}`
+        );
+      }
+    }
 
     const onPath = await findOnPath("dsh");
     if (onPath !== undefined) candidates.push(await this.probePathCandidate(onPath));

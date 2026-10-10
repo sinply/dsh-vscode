@@ -213,6 +213,18 @@ export async function launchChrome({ width = 1400, height = 900, port } = {}) {
   if (exe === undefined) return undefined;
   const cdpPort = port ?? 9400 + Math.floor(Math.random() * 400);
   const profile = mkdtempSync(path.join(tmpdir(), "dsh-verify-chrome-"));
+  // Chrome keeps handles on its profile after the process is killed (DIPS and
+  // friends on Windows), so a plain rmSync can throw EBUSY and take the whole
+  // suite down during teardown. Retry, then give up quietly: a leftover temp
+  // profile is harmless, a failed suite is not.
+  const removeProfile = () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        rmSync(profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 200 });
+        return;
+      } catch { /* still locked */ }
+    }
+  };
   const chrome = spawn(exe, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profile}`, `--window-size=${width},${height}`, "about:blank"], { stdio: "ignore" });
   let target;
   for (let i = 0; i < 80 && target === undefined; i++) {
@@ -224,7 +236,7 @@ export async function launchChrome({ width = 1400, height = 900, port } = {}) {
   }
   if (target === undefined) {
     chrome.kill();
-    rmSync(profile, { recursive: true, force: true });
+    removeProfile();
     return undefined;
   }
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -239,7 +251,7 @@ export async function launchChrome({ width = 1400, height = 900, port } = {}) {
       try { ws.close(); } catch {}
       chrome.kill();
       await sleep(300);
-      rmSync(profile, { recursive: true, force: true });
+      removeProfile();
     },
   };
 }

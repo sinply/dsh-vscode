@@ -1,6 +1,11 @@
-// The settings button must keep working: open → close → open again.
+// The settings button must keep working: open → close → open again — and a write
+// the server REFUSES must not be invisible.
 //
-// Two layers are covered:
+// Three layers are covered:
+//   0. The settings/update wire itself: the proxy recognises a `ok:false`
+//      envelope, reads the `{ns, patch}` back out of the request, and hands it to
+//      the recovery hook — while still passing the upstream bytes through
+//      unchanged. (No server needed: a stub upstream answers the denial.)
 //   1. ChatPanel delivery, under BOTH webview-host behaviours — a byte-identical
 //      html being dropped (no reload, so no new iframe-ready) and every html
 //      reloading. The second and third clicks must still reach the page.
@@ -10,9 +15,90 @@
 //
 //   node scripts/verify/settings-flow.mjs [origin]
 
-import { forgeCookie, launchChrome, loadWithStubbedVscode, originArg, rpc, sleep, suite, waitFor } from "./harness.mjs";
+import * as http from "node:http";
+import { forgeCookie, launchChrome, loadWithStubbedVscode, originArg, rpc, sleep, stubVscode, suite, waitFor } from "./harness.mjs";
 
 const s = suite("settings flow");
+
+// ---- 0. the refusal wire format (stub upstream, no dsh) -------------------
+{
+  const { GuiProxy, readSettingsRejection, readSettingsArgs } = loadWithStubbedVscode("out/guiProxy.js", stubVscode());
+  const refused = JSON.stringify({
+    result: {
+      ok: false,
+      error: { code: "settings/rejected", message: "dsh: profile reload requires the root Include entry", details: { ns: "ui-settings-general" } },
+    },
+  });
+  const accepted = JSON.stringify({ result: { ok: true, value: {} } });
+  s.check("a refused write is recognised", readSettingsRejection(refused).rejected === true);
+  s.check(
+    "the refusal keeps the upstream message",
+    /profile reload requires the root Include entry/.test(readSettingsRejection(refused).message ?? ""),
+    readSettingsRejection(refused).message
+  );
+  s.check("an accepted write is not a refusal", readSettingsRejection(accepted).rejected === false);
+  s.check(
+    "an unreadable body is never a refusal",
+    readSettingsRejection("<html>502</html>").rejected === false && readSettingsRejection("").rejected === false && readSettingsRejection("{}").rejected === false
+  );
+
+  const wire = JSON.stringify({
+    type: "client-request",
+    rpcId: "verify-1",
+    method: "settings/update",
+    payload: { args: { ns: "ui-settings-general", patch: { welcomeNoticeVersion: "2026-08-13.1" } } },
+  });
+  s.check(
+    "typert wire args are read back",
+    readSettingsArgs(wire).ns === "ui-settings-general" && readSettingsArgs(wire).patch?.welcomeNoticeVersion === "2026-08-13.1",
+    JSON.stringify(readSettingsArgs(wire))
+  );
+  const legacy = JSON.stringify({ payload: { ns: "ui-theme", patch: { preference: "dark" } } });
+  s.check("raw payload args are read back", readSettingsArgs(legacy).ns === "ui-theme", JSON.stringify(readSettingsArgs(legacy)));
+  s.check("an unreadable request body yields nothing", readSettingsArgs("not json").ns === undefined);
+
+  // The proxy must see the refusal AND leave the exchange untouched.
+  const upstreamSeen = [];
+  const upstream = http.createServer((req, res) => {
+    upstreamSeen.push({ url: req.url ?? "", encoding: req.headers["accept-encoding"] });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end((req.url ?? "").includes("case=ok") ? accepted : refused);
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const seen = [];
+  const proxy = new GuiProxy(upstream.address().port, () => "dsh-auth-stub=v1.x", (rejection) => seen.push(rejection));
+  await proxy.start();
+  try {
+    const post = (suffix) =>
+      fetch(`${proxy.url}api/settings/update${suffix}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "accept-encoding": "gzip, deflate" },
+        body: wire,
+      }).then((r) => r.text());
+    s.check("the refusal still reaches the page byte-identically", (await post("?case=reject")) === refused);
+    s.check("the proxy reported exactly one refusal", seen.length === 1, JSON.stringify(seen));
+    s.check("the reported namespace is the one that was written", seen[0]?.ns === "ui-settings-general");
+    s.check("the reported patch is the one that was written", seen[0]?.patch?.welcomeNoticeVersion === "2026-08-13.1");
+    // A compressed answer would make the JSON check impossible, so the inspected
+    // request must not advertise gzip — a silent skip here means no recovery.
+    s.check("the inspected POST asks for an uncompressed answer", upstreamSeen[0]?.encoding === undefined, String(upstreamSeen[0]?.encoding));
+    s.check("an accepted write reports nothing", (await post("?case=ok")) === accepted && seen.length === 1, `seen=${seen.length}`);
+    // Only /api/settings/update is inspected — other POSTs must stay invisible
+    // (and untouched: their accept-encoding survives).
+    await fetch(`${proxy.url}api/session/create`, { method: "POST", headers: { "accept-encoding": "gzip, deflate" }, body: "{}" });
+    // A GET on the settings endpoint is a read, never a write.
+    await fetch(`${proxy.url}api/settings/update`);
+    s.check("only POST /api/settings/update is inspected", seen.length === 1, `seen=${seen.length}`);
+    s.check(
+      "other requests keep their accept-encoding",
+      upstreamSeen.some((h) => h.url.includes("session/create") && h.encoding === "gzip, deflate"),
+      JSON.stringify(upstreamSeen)
+    );
+  } finally {
+    await proxy.stop();
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+}
 
 // ---- 1. delivery through ChatPanel ---------------------------------------
 for (const mode of ["skip", "reload"]) {

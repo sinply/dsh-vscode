@@ -14,6 +14,7 @@
 //            feature-check      workspace/session/theme lifecycle through the API
 //            launcher           the native launcher's HTML, toolbar and icon font
 //            notice             settings write path + pre-release notice ack
+//            platform           the bundled tree's platform contract + payloads
 //            package-check      the built vsix: contents + boot from the extracted tree
 //   live     panels             the split-panel invariant in both panel modes
 //            pin                per-tab session pinning (?session=)
@@ -25,7 +26,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { REPO, dshHome, forgeCookie, originArg, rpc } from "./harness.mjs";
 
-const OFFLINE = ["panel-tabs", "settings-flow", "shell-check", "adopt-unpatched", "feature-check", "launcher", "notice", "package-check"];
+const OFFLINE = ["panel-tabs", "settings-flow", "shell-check", "adopt-unpatched", "feature-check", "launcher", "notice", "platform", "package-check"];
 const LIVE = ["panels", "pin", "plugins", "titles"];
 
 const argv = process.argv.slice(2);

@@ -29,15 +29,86 @@ const STRIP_HEADERS = new Set([
 /** Cookie value of one validated browser session (`name=value`), optional. */
 export type CookieProvider = () => Promise<string | undefined> | string | undefined;
 
+/** One settings write the dsh server REFUSED to persist, as seen on the wire. */
+export interface RejectedSettingsWrite {
+  /** Settings namespace the GUI wrote (e.g. "ui-settings-general"), when the
+   * request body carried one. */
+  ns?: string;
+  /** The patch the GUI sent, when the request body carried one. */
+  patch?: unknown;
+  /** Whatever the server answered with. */
+  message: string;
+}
+
+/** Called once per rejected settings write. Never allowed to disturb the pipe. */
+export type SettingsRejectionHook = (rejection: RejectedSettingsWrite) => void;
+
+/** The ONE endpoint whose bodies the proxy inspects (the GUI's own writes). */
+const SETTINGS_PATH = "/api/settings/update";
+/** Never buffer more than this much of a request/response body. Anything
+ * larger is passed through untouched and simply not inspected. */
+const CAPTURE_LIMIT = 1 << 20;
+
+/**
+ * Is this a settings/update answer the server REFUSED to persist?
+ *
+ * dsh answers HTTP 200 with `{"result":{"ok":false,"error":{…}}}` for a write it
+ * could not apply — notably the "profile reload requires the root Include
+ * entry" state, where reads keep working while every write is dropped, so the
+ * page shows nothing at all. Everything that is not a parseable `ok:false`
+ * envelope (compressed, streamed, HTML, empty) counts as not-rejected, so a
+ * body we cannot read can never be turned into a false recovery.
+ */
+export function readSettingsRejection(responseBody: string): { rejected: boolean; message?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(responseBody);
+  } catch {
+    return { rejected: false };
+  }
+  const result = (parsed as { result?: unknown }).result;
+  if (result === null || typeof result !== "object") return { rejected: false };
+  const envelope = result as { ok?: unknown; error?: { code?: unknown; message?: unknown } };
+  if (envelope.ok !== false) return { rejected: false };
+  const code = typeof envelope.error?.code === "string" ? envelope.error.code : "";
+  const message = typeof envelope.error?.message === "string" ? envelope.error.message : "";
+  return {
+    rejected: true,
+    message: code !== "" && message !== "" ? `${code}: ${message}` : code !== "" ? code : message !== "" ? message : "settings write rejected"
+  };
+}
+
+/** Pull `{ns, patch}` out of a settings/update request body. dsh 0.1.2+ uses a
+ * typert envelope (`payload: {args: {ns, patch}}`); the older wire put the
+ * descriptor straight into `payload`. Both shapes are accepted; anything
+ * unreadable yields an empty result rather than an exception. */
+export function readSettingsArgs(requestBody: string): { ns?: string; patch?: unknown } {
+  let payload: unknown;
+  try {
+    payload = (JSON.parse(requestBody) as { payload?: unknown }).payload;
+  } catch {
+    return {};
+  }
+  let args: unknown = payload;
+  if (payload !== null && typeof payload === "object" && "args" in (payload as Record<string, unknown>)) {
+    args = (payload as { args?: unknown }).args;
+  }
+  if (args === null || args === undefined || typeof args !== "object") return {};
+  const record = args as { ns?: unknown; patch?: unknown };
+  return { ns: typeof record.ns === "string" ? record.ns : undefined, patch: record.patch };
+}
+
 export class GuiProxy {
   private server?: http.Server;
   private readonly targetPort: number;
   private readonly cookie: CookieProvider;
+  private readonly onSettingsRejected?: SettingsRejectionHook;
   private lastPort?: number;
 
-  constructor(targetPort: number, cookie: CookieProvider) {
+  constructor(targetPort: number, cookie: CookieProvider, onSettingsRejected?: SettingsRejectionHook) {
     this.targetPort = targetPort;
     this.cookie = cookie;
+    this.onSettingsRejected = onSettingsRejected;
   }
 
   /** `http://127.0.0.1:<port>/` while running. */
@@ -85,17 +156,34 @@ export class GuiProxy {
     res: http.ServerResponse,
     target: { host: string; port: number }
   ): Promise<void> {
+    // A rejected settings write is invisible otherwise: the GUI is its own
+    // origin inside the webview, dsh answers HTTP 200, and the extension never
+    // sees the exchange. Inspect this ONE endpoint (bounded, pass-through) so a
+    // refusal can be turned into the documented manual workaround.
+    const inspect = (req.method ?? "").toUpperCase() === "POST" && (req.url ?? "").split("?")[0] === SETTINGS_PATH;
+
     const headers: http.OutgoingHttpHeaders = {};
     for (const [key, value] of Object.entries(req.headers)) {
       if (value === undefined) continue;
       const lower = key.toLowerCase();
       if (STRIP_HEADERS.has(lower)) continue;
       if (lower === "connection" || lower === "upgrade" || lower === "transfer-encoding") continue;
+      // Ask for an uncompressed answer on the one endpoint whose body has to be
+      // readable: a gzip body would defeat the JSON check and silently disable
+      // the recovery. The page still receives a valid answer either way.
+      if (inspect && lower === "accept-encoding") continue;
       headers[key] = value;
     }
     headers.host = `${target.host}:${target.port}`;
     const cookie = await this.cookie();
     if (cookie !== undefined && cookie !== "") headers.cookie = cookie;
+
+    let requestBody = "";
+    if (inspect) {
+      req.on("data", (chunk: Buffer) => {
+        if (requestBody.length < CAPTURE_LIMIT) requestBody += chunk.toString("utf8");
+      });
+    }
 
     const upstream = http.request(
       {
@@ -107,6 +195,13 @@ export class GuiProxy {
       },
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        if (inspect) {
+          let responseBody = "";
+          upstreamRes.on("data", (chunk: Buffer) => {
+            if (responseBody.length < CAPTURE_LIMIT) responseBody += chunk.toString("utf8");
+          });
+          upstreamRes.on("end", () => this.reportSettingsRejection(requestBody, responseBody));
+        }
         upstreamRes.pipe(res);
       }
     );
@@ -115,6 +210,22 @@ export class GuiProxy {
       res.end(`gui proxy: ${err.message}`);
     });
     req.pipe(upstream);
+  }
+
+  /** Hand a refused settings write to the hook. The bytes are already on their
+   * way to the page, so a malformed body or a throwing hook must never change
+   * what the webview receives. */
+  private reportSettingsRejection(requestBody: string, responseBody: string): void {
+    const hook = this.onSettingsRejected;
+    if (hook === undefined) return;
+    try {
+      const rejection = readSettingsRejection(responseBody);
+      if (!rejection.rejected) return;
+      const { ns, patch } = readSettingsArgs(requestBody);
+      hook({ ns, patch, message: rejection.message ?? "settings write rejected" });
+    } catch {
+      /* proxy-side only: never let this reach the response */
+    }
   }
 
   private forwardUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, target: { host: string; port: number }): void {

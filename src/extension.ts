@@ -39,6 +39,13 @@ export function activate(context: vscode.ExtensionContext): void {
     autoInstallDir,
     autoRestart: getCfg("autoRestart", true),
     watchExternal: getCfg("autoStart", true),
+    onNotice: (message) => {
+      // Surfaced when the dsh service refuses a settings write and the
+      // extension had to fall back to writing the profile patch itself
+      // (see DshManager.recoverSettingsWrite). Without this the user sees
+      // only the GUI's own "暂时无法保存确认状态" string.
+      void vscode.window.showInformationMessage(`DSH: ${message}`);
+    },
     onInfo: (info) => {
       renderStatus(info);
       panel.update(info);
