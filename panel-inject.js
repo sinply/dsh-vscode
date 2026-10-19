@@ -273,7 +273,26 @@ const PANEL_INJECT = `<!-- ${PANEL_MARKER} -->
       ' { display: none !important; }';
   document.head.appendChild(panelStyle);
   var settingsKey = 'dsh.vscode.panel.settings';
+  // ≤0.2.0 renders the settings trigger directly inside the sidebar's settings
+  // area ('[class$="_settingsArea"] button[aria-haspopup="dialog"]').
   var settingsTrigger = '[class$="_settingsArea"] button[aria-haspopup="dialog"]';
+  // 0.2.1 fills that same slot with the ACCOUNT MENU, so the direct trigger is
+  // now only the slot's fallback and is never rendered: settings moved into the
+  // menu, as its first item (the 'settings.open' command, labelled 设置 /
+  // Settings / 偏好, with its Ctrl+Alt+, hint). Both routes are attempted, so
+  // one injected copy serves either frontend. The slot cannot be matched by
+  // '[data-slot="settings.launcher"]', because the account plugin REPLACES that
+  // slot's content while 'sidebar.settings' (the settingsArea div) stays stable.
+  var settingsLauncher = '[class$="_settingsArea"] button[aria-haspopup="menu"]';
+  var settingsMenuLabel = /^(设置|Settings|Preferences|偏好)/i;
+  var findSettingsMenuItem = function () {
+    var items = document.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] button, [role="menu"] a');
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].getClientRects().length === 0) continue;
+      if (settingsMenuLabel.test((items[i].innerText || '').replace(/\s+/g, ' ').trim())) return items[i];
+    }
+    return null;
+  };
   // The GUI persists its session selection under this key as a JSON snapshot
   // ({"sessionId":"...","subagentAddress":...}) written by its snapshot-store
   // middleware. A RAW session id breaks rehydration (JSON.parse throws), so
@@ -366,31 +385,53 @@ const PANEL_INJECT = `<!-- ${PANEL_MARKER} -->
       }
       return false;
     };
-    // Settings requested from the launcher: click the (hidden) settings
-    // trigger so the modal opens here, in the wide editor tab. Idempotent:
-    // if the settings dialog is already open, do nothing — the URL-param boot
-    // and the fallback host message can both request it. The retry budget is
-    // generous (30s) because a COLD webview panel boots the whole app
-    // (bundle + plugins) and React renders the trigger late.
+    // Settings requested from the launcher: open the modal here, in the wide
+    // editor tab. Idempotent: if the settings dialog is already open, do
+    // nothing — the URL-param boot and the fallback host message can both
+    // request it. The retry budget is generous (30s) because a COLD webview
+    // panel boots the whole app (bundle + plugins) and React renders the
+    // trigger late.
+    //
+    // Two frontends, one function: a direct trigger (≤0.2.0) or the account
+    // menu's settings item (0.2.1+, where the trigger is only the slot's
+    // unrendered fallback). The menu route needs TWO clicks — one to open the
+    // menu, one for the item — so both are budgeted separately: re-clicking the
+    // direct trigger is what closes a slow-opening modal, and re-clicking the
+    // launcher is what would close the menu again.
     var openSettings = function () {
       var tries = 100; // the trigger is not rendered yet during a cold boot
       var clicks = 0; // bounded: never toggle a slow-opening modal shut
+      var menus = 0; // bounded: never reopen the menu just as the item appears
       var attempt = function () {
         if (settingsDialogOpen()) return; // already open
         var t = document.querySelector(settingsTrigger);
-        if (t === null) {
-          if (--tries > 0) setTimeout(attempt, 300);
+        if (t !== null) {
+          try { localStorage.removeItem(settingsKey); } catch (e2) {}
+          if (clicks >= 2) return;
+          clicks++;
+          t.click();
+          // Verify: a click fired right after a close can land while React is
+          // still tearing the previous tree down. attempt() re-checks the
+          // settings dialog before clicking again, so a merely SLOW open is never
+          // toggled shut.
+          setTimeout(attempt, 1200);
           return;
         }
-        try { localStorage.removeItem(settingsKey); } catch (e2) {}
-        if (clicks >= 2) return;
-        clicks++;
-        t.click();
-        // Verify: a click fired right after a close can land while React is
-        // still tearing the previous tree down. attempt() re-checks the
-        // settings dialog before clicking again, so a merely SLOW open is never
-        // toggled shut.
-        setTimeout(attempt, 1200);
+        var item = findSettingsMenuItem();
+        if (item !== null) {
+          try { localStorage.removeItem(settingsKey); } catch (e3) {}
+          if (clicks >= 2) return;
+          clicks++;
+          item.click();
+          setTimeout(attempt, 1200);
+          return;
+        }
+        var launcher = document.querySelector(settingsLauncher);
+        if (launcher !== null && menus < 3) {
+          menus++;
+          launcher.click();
+        }
+        if (--tries > 0) setTimeout(attempt, 300);
       };
       attempt();
     };

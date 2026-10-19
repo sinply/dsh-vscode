@@ -6,7 +6,15 @@
 
 本扩展**自行启动并管理 `dsh web` 服务**，并把 GUI **拆成两块**嵌入 VS Code
 
-本次更新（版本 2026.10.11）：
+本次更新（版本 2026.10.19）：
+
+- **内置 dsh 升级到 `@deepseek-ai/dsh@0.2.1-rc.2`**（自 0.2.0-rc.2，registry 的 `next` 线；`latest` 仍是 0.2.0-rc.2）。依赖树与前端随之更新，拆分补丁随包重建。
+- **适配 0.2.1：「设置」入口搬进了账号菜单**。0.2.1 的侧栏设置区（`sidebar.settings` / `[class$="_settingsArea"]`）**不再渲染设置按钮**——它降级成该槽位的 fallback，被账号插件的账号菜单（`settings.launcher`）顶掉了；设置变成账号菜单的第一项（`settings.open` 命令，显示为「设置 Ctrl + Alt + ,」）。适配器现在**两条路都走**：老前端直接点设置按钮，0.2.1 先点开账号菜单、再点其中的「设置」项。判定「设置弹窗是否已打开」的规则没变（按弹窗内的设置导航列表识别），所以反复开、`&openSettings=1` 冷启动、宿主消息三条入口依旧共用同一套幂等逻辑。
+- **其它集成点复核**：`patch-frontend` 注入正常；分屏不变式（center = 会话占满宽度且侧栏被涂抹隐藏、sidebar = 只留侧栏）成立；单标签页切换、每标签页会话固定、插件面板（`&openPanel=plugins` 冷启动 + 宿主消息连续重开两个来回）、冷投影标题（不再出现「未命名会话」）全部通过。
+- **验证**：`npm run smoke` 与 `npm run verify`（10 个离线套件 + 4 个实时套件）对内置的 0.2.1-rc.2 **全绿**；`panels` 里「设置弹窗要能盖在会话上打开」这一条就是这次适配的守门人（0.2.1 上先红后绿）。
+- 上一版（2026.10.11）的修复同样包含在内：Linux 原生依赖补齐 + 平台闸门、设置写入被拒时自动落盘并重启服务、`npm root -g` 路径语义修正、默认标签页的 `seed=1`。
+
+上一版（2026.10.11）细节：
 
 - **全局安装的 dsh 找不到了（`npm root -g` 的路径语义）**：`npm root -g` 打印的是 `node_modules` **目录本身**（`C:\…\npm\node_modules`），而扫描器还会在它下面再接一层 `node_modules`，于是拼出 `…\npm\node_modules\node_modules\@deepseek-ai\dsh\lib\bin.js` —— 全局安装既选不中、前端也扫不到。新增 `installRootOf()` 统一剥掉尾部 `node_modules`（顺手容忍结尾斜杠），用于全局安装查找与前端扫描两处。
 - **默认/设置标签页丢掉了「记住上次会话」的种子**：`panelSrc()` 用 `sessionId ?? opts.seedSession` 回退，但 `ChatPanel` 对未固定的标签页传的是 `""`（不是 `undefined`），`"" ?? x` 不会回退 —— 于是每个默认/设置标签页都少了 `&seed=1`，GUI 起来停在「新会话」而不是上次那段对话。现在按 `sessionId !== undefined && sessionId !== ""` 判断固定与否，未固定时才写 `seed=1`。

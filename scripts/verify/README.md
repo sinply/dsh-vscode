@@ -20,7 +20,7 @@ npm run verify -- http://127.0.0.1:3080
 | `launcher` | 离线 | **左侧原生列表**：生成的 HTML 能解析、工具栏按钮（新建会话 / 插件 / 设置）齐备、**图标名 ↔ CSS 规则 ↔ 官方 codepoint** 三者一致，并校验该 codepoint 在 `media/codicon.ttf` 里真的有字形 ——「插件按钮没图标」正是这类问题 |
 | `notice` | 离线 | **设置写入链路 + 预览版声明确认/屏蔽**：声明会被适配器隐藏（用生成产物里的抑制代码对着合成对话框验证）、真实设置弹窗不受影响、`settings/update` 接受确认并写到 `profiles/web/cordis.patch.yml`、重启后写入依旧正常 |
 | `package-check` | 离线 | **打包产物**：版本、内置 dsh、适配器与仓库逐字节一致、LibreOffice payload 已裁掉，并**从解压树真启动一次 dsh** |
-| `panels` | 实时 | **分屏不变式**（真浏览器）：center = 侧栏列被涂抹隐藏且会话占满宽度、设置弹窗仍能盖在上面打开/关闭；sidebar = 只留侧栏、会话/详情列归零 |
+| `panels` | 实时 | **分屏不变式**（真浏览器）：center = 侧栏列被涂抹隐藏且会话占满宽度、设置弹窗仍能盖在上面打开/关闭；sidebar = 只留侧栏、会话/详情列归零。0.2.1 起设置入口搬进了**账号菜单**（`[class$="_settingsArea"]` 里只剩账号按钮，设置变成菜单里的「设置」项），「设置弹窗要能打开」这一条就是这条入口的守门人 —— 纯按键打不开（合成与 CDP 真按键都试过），必须点开菜单再点那一项 |
 | `pin` | 实时 | **每标签页会话固定**：`?session=` 在启动前写入 `dsh.sessions.current`，且应用确实开在该会话（`document.title` 跟随） |
 | `plugins` | 实时 | **「插件」入口**（0.2.0 的 `sidebar.panellist` 面板）：冷启动 `&openPanel=plugins` 打开插件管理器、切走后用宿主消息**可再次打开**（连做两轮），且不被无关弹窗挡住；服务老于 0.2.0 时报 skip |
 | `titles` | 实时* | **冷投影下的标题**：复制 `$DSH_HOME/sessions` 成冷库 → 用**生成产物里抠出来的** `sessionLabel`/`isListable` 判定，确保不再出现「未命名会话」；回填后投影转热 |
