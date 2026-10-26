@@ -26,7 +26,7 @@ import { execFileSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { get } from "node:https";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -44,7 +44,20 @@ const WANTED = [
   // node-addon-require-builtin-linux-x64-gnu". koffi loads its .node the same way
   // from @koromix/koffi-<platform>.
   "node_modules/node-addon-require-builtin-linux-x64-gnu",
-  "node_modules/@koromix/koffi-linux-x64"
+  "node_modules/@koromix/koffi-linux-x64",
+  // dsh 0.2.1 added two more platform-split native families, and missing them
+  // is invisible on Windows while breaking Linux at the first session write:
+  //   - @deepseek-ai/node-addon-system-<platform>-<arch> carries the POSIX
+  //     `flock` binding used as the session WRITE LEASE (Windows uses a named
+  //     kernel semaphore instead, so Windows never loads it) and the
+  //     landlock-run sandbox launcher. Without the linux payload, the lease
+  //     throws "MODULE_NOT_FOUND: @deepseek-ai/node-addon-system-linux-x64"
+  //     on the first materializing write — i.e. an agent turn dies mid-way.
+  //   - sherpa-onnx-<platform> is the speech-to-text (voice input) native
+  //     library; dsh ships a win64 build by default, the linux one has to be
+  //     added here.
+  "node_modules/@deepseek-ai/node-addon-system-linux-x64",
+  "node_modules/sherpa-onnx-linux-x64"
 ];
 
 const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
@@ -88,6 +101,27 @@ function installedVersion(dir) {
 let fetched = 0;
 let skipped = 0;
 
+/** Unpack `<stage>/<tarball>` into `target`, dropping the leading `package/`.
+ * The archive is addressed by NAME with `cwd: stage` and the Windows built-in
+ * bsdtar is preferred, so an absolute Windows path can never be mistaken for a
+ * remote `host:path` (GNU tar: "Cannot connect to C: resolve failed"). */
+function extract(tarball, stage, target) {
+  const name = basename(tarball);
+  const systemRoot = process.env.SystemRoot;
+  const systemTar = systemRoot === undefined ? undefined : join(systemRoot, "System32", "tar.exe");
+  const candidates = systemTar !== undefined && existsSync(systemTar) ? [systemTar, "tar"] : ["tar"];
+  let lastError;
+  for (const bin of candidates) {
+    try {
+      execFileSync(bin, ["-xzf", name, "--strip-components=1", "-C", target], { cwd: stage, stdio: "inherit" });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 for (const name of WANTED) {
   const entry = lock.packages?.[name];
   if (entry === undefined || typeof entry.resolved !== "string" || typeof entry.integrity !== "string") {
@@ -112,8 +146,12 @@ for (const name of WANTED) {
     }
     rmSync(target, { recursive: true, force: true });
     mkdirSync(target, { recursive: true });
-    // bsdtar on Windows 10+ and GNU tar everywhere else both take these flags.
-    execFileSync("tar", ["-xzf", tarball, "--strip-components=1", "-C", target], { stdio: "inherit" });
+    // Prefer the Windows built-in bsdtar: a GNU tar earlier on PATH reads an
+    // absolute `C:\…\package.tgz` as the rsh form `host:path` and fails with
+    // "Cannot connect to C: resolve failed". The archive is therefore passed as
+    // a NAME with `cwd` set to the staging dir, which no tar flavour can
+    // misparse, and `-C` gets the (absolute) target.
+    extract(tarball, stage, target);
     console.log(`[platform-deps] ${name} v${installedVersion(target) ?? "?"} unpacked`);
     fetched += 1;
   } finally {

@@ -273,10 +273,23 @@ export function findVsix() {
     .sort((a, b) => b.localeCompare(a))[0];
 }
 
+/** Locate a tar that can take a Windows absolute path.
+ *
+ * Git for Windows puts its GNU tar first on PATH for some shells, and GNU tar
+ * reads `C:\…\x.vsix` as the rsh form `host:path` — "Cannot connect to C: resolve
+ * failed". The Windows built-in bsdtar never does that, so prefer it and fall
+ * back to whatever `tar` is (Linux CI has no choice and needs none). */
+function tarBinary() {
+  const systemTar = process.env.SystemRoot === undefined ? undefined : path.join(process.env.SystemRoot, "System32", "tar.exe");
+  return systemTar !== undefined && existsSync(systemTar) ? systemTar : "tar";
+}
+
 /** Extract files from a vsix (zip) into a temp dir; caller removes it. */
 export function extractVsix(vsix, entries = []) {
   const dir = mkdtempSync(path.join(tmpdir(), "dsh-verify-vsix-"));
-  execFileSync("tar", ["-xf", vsix, "-C", dir, ...entries], { stdio: "ignore" });
+  // Address the archive by NAME with cwd set to its directory: no tar flavour can
+  // then mistake an absolute Windows path for a remote host.
+  execFileSync(tarBinary(), ["-xf", path.basename(vsix), "-C", dir, ...entries], { cwd: path.dirname(vsix), stdio: "ignore" });
   return dir;
 }
 

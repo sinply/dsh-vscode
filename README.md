@@ -6,7 +6,18 @@
 
 本扩展**自行启动并管理 `dsh web` 服务**，并把 GUI **拆成两块**嵌入 VS Code
 
-本次更新（版本 2026.10.19）：
+本次更新（版本 2026.10.26）：
+
+- **Linux 上「聊着聊着就断」的根因：0.2.1 新引入的两族原生包漏打包了**。dsh 0.2.1 比 0.2.0 多了两族按平台拆分的原生依赖，npm 只装宿主平台那一份，而打包机是 Windows：
+  - `@deepseek-ai/node-addon-system-<platform>-<arch>` —— POSIX 上它就是**会话写入租约**（`flock`）；Windows 改用命名内核信号量，所以**Windows 完全不受影响**，缺包只在 Linux 上炸；
+  - `sherpa-onnx-<platform>` —— 语音转写（语音输入）的原生库。
+
+  2026.10.19 只补了旧的五个包，于是 Linux 版缺 `node-addon-system-linux-x64`：会话第一次真正写盘时 `tryLockExclusive()` 抛 `MODULE_NOT_FOUND`，表现为 agent 回复中断、面板显示断连/反复重连（我在 WSL 里用真实产物复现出了这条错误，补齐后同一个调用返回成功）。
+- **打包脚本**：`scripts/fetch-platform-deps.mjs` 补齐这两族 linux-x64 载荷（未压缩约 +34 MB，`sherpa` 的 `libonnxruntime.so` 占大头）；顺手修了 tar 兼容性 —— PATH 上的 GNU tar 会把 `C:\…` 当远程主机（`Cannot connect to C: resolve failed`），现在优先用系统 `System32\tar.exe`，归档用相对路径 + cwd。
+- **验证套件升级**：`platform` 不再靠手写清单，而是**从依赖树推导** —— 凡是声明了 `<name>-<平台>-<架构>` optionalDependency 的包，必须在每个 `BUNDLED_TREE_PLATFORMS` 上都有对应载荷，且不被 `.vscodeignore` 排除（故意除外者要显式列名单并写理由）。这一类「Windows 正常、Linux 缺件」的坑从此会被套件直接抓出来。
+- **验证**：`platform` 40/40 通过；WSL 内对**打包产物**实测：`tryLockExclusive()` → LOCK OK、服务启动、建会话、设置写入均正常。
+
+上一版（2026.10.19）：
 
 - **内置 dsh 升级到 `@deepseek-ai/dsh@0.2.1-rc.2`**（自 0.2.0-rc.2，registry 的 `next` 线；`latest` 仍是 0.2.0-rc.2）。依赖树与前端随之更新，拆分补丁随包重建。
 - **适配 0.2.1：「设置」入口搬进了账号菜单**。0.2.1 的侧栏设置区（`sidebar.settings` / `[class$="_settingsArea"]`）**不再渲染设置按钮**——它降级成该槽位的 fallback，被账号插件的账号菜单（`settings.launcher`）顶掉了；设置变成账号菜单的第一项（`settings.open` 命令，显示为「设置 Ctrl + Alt + ,」）。适配器现在**两条路都走**：老前端直接点设置按钮，0.2.1 先点开账号菜单、再点其中的「设置」项。判定「设置弹窗是否已打开」的规则没变（按弹窗内的设置导航列表识别），所以反复开、`&openSettings=1` 冷启动、宿主消息三条入口依旧共用同一套幂等逻辑。

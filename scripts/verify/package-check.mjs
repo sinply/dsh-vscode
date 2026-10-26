@@ -31,7 +31,8 @@ const NATIVE = {
     "node_modules/@img/sharp-win32-x64/lib",
     "node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe",
     "node_modules/node-addon-require-builtin-win32-x64-msvc/prebuilt",
-    "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node"
+    "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node",
+    "node_modules/sherpa-onnx-win-x64"
   ],
   "linux-x64": [
     "node_modules/node-pty/prebuilds/linux-x64/pty.node",
@@ -39,7 +40,11 @@ const NATIVE = {
     "node_modules/@img/sharp-libvips-linux-x64/lib",
     "node_modules/@vscode/ripgrep-linux-x64/bin/rg",
     "node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt",
-    "node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node"
+    "node_modules/@koromix/koffi-linux-x64/linux_x64/koffi.node",
+    // POSIX session write lease (flock) + landlock sandbox launcher — Windows
+    // uses a named kernel semaphore instead, so only Linux carries this one.
+    "node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/glibc/system.node",
+    "node_modules/sherpa-onnx-linux-x64/sherpa-onnx.node"
   ]
 };
 
